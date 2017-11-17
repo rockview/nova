@@ -1,5 +1,5 @@
 # Data General Nova Emulator
-Emulator for Data Genral Nova 16-bit minicomputer.
+Emulator for Data General Nova 16-bit minicomputer.
 
 The primary motivation for this project is to learn about the go programming
 language, but I also have a fondness for this machine as I learned to program it
