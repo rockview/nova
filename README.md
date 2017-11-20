@@ -16,4 +16,4 @@ the ultimate goal of being able to run the RDOS operating system.
 
 After this, I plan to teach myself Verilog to implement the Nova architecture
 with an FPGA. Writing the software emulator first, seemed to be a good way
-easing myself into, what is for me, an entirely new field.
+easing myself into, what is for me, is an entirely new field.

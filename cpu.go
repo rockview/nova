@@ -22,8 +22,15 @@
 
 package nova
 
-import (
-    "fmt"
+const (
+    ioNIO uint16 = iota
+    ioDIA
+    ioDOA
+    ioDIB
+    ioDOB
+    ioDIC
+    ioDOC
+    ioSKP
 )
 
 const (
@@ -39,34 +46,45 @@ const (
 
 // CPU state
 type Nova struct {
-    pc uint16           // Program counter
-    ac [4]uint16        // Accumulators
-    flags uint          // Processor flags
-    memory [k32K]uint16 // 32KW memory
-    sr uint16           // Switch register
+    pc uint16                   // Program counter
+    ac [4]uint16                // Accumulators
+    flags uint                  // Processor flags
+    m [k32K]uint16              // 32KW memory
+    devices map[uint16]*device  // Devices
+    intReq uint64               // Interrupting devices
+    sr uint16                   // Switch register
+    cmd chan message            // Console command
+    ack chan message            // Console acknowlege
+    halt chan struct{}          // Signals machine HALT
 }
-
-type Status int
 
 const (
-    Run Status = iota
-    Halt
-    IndirectLoop
+    cpuRun int = iota
+    cpuHalt
 )
 
+// NewNova creates a new instance of a nova processor. The processor is stopped
+// and the interrupt on flag, the 16-bit priority mask, and all busy and done
+// flags are set to 0.
 func NewNova() *Nova {
-    return &Nova{}
+    nova := Nova{
+        devices: make(map[uint16]*device),
+        cmd: make(chan message),
+        ack: make(chan message),
+        halt: make(chan struct{}),
+    }
+    go nova.processor()
+    return &nova
 }
 
-// Step one instruction
-func (p *Nova) Step(trace bool) Status {
-    if trace {
-        fmt.Println(p.State())
-    }
+// Execute one instruction.
+func (n *Nova) step() int {
+    // Handle data channel requests
+    // Handle pending interrupts
 
     // Fetch next instruction
-    ir := p.memory[p.pc&kAddrMask]
-    p.pc++
+    ir := n.m[n.pc&kAddrMask]
+    n.pc++
 
     // Decode and execute instruction
     if ir&0100000 != 0 {
@@ -76,19 +94,19 @@ func (p *Nova) Step(trace bool) Status {
         // Initilize alu with carry IR<10,11>
         switch (ir&000060) >> 4 {
         case 0:
-            if p.flags&cpuC != 0 {
+            if n.flags&cpuC != 0 {
                 alu = 1 << 16
             }
         case 1: // Z
         case 2: // O
             alu = 1 << 16
         case 3: // C
-            if p.flags&cpuC == 0 {
+            if n.flags&cpuC == 0 {
                 alu = 1 << 16
             }
         }
 
-        acs := p.ac[(ir&060000) >> 13]  // ACS<0-15>
+        acs := n.ac[(ir&060000) >> 13]  // ACS<0-15>
         acx := (ir&014000) >> 11        // ACD index IR<1,2>
 
         // Perform operation IR<5-7>
@@ -102,13 +120,13 @@ func (p *Nova) Step(trace bool) Status {
         case 3: // INC
             alu += uint32(acs) + 1
         case 4: // ADC
-            alu += uint32(p.ac[acx]) + uint32(^acs)
+            alu += uint32(n.ac[acx]) + uint32(^acs)
         case 5: // SUB
-            alu += uint32(p.ac[acx]) + uint32(^acs) + 1
+            alu += uint32(n.ac[acx]) + uint32(^acs) + 1
         case 6: // ADD
-            alu += uint32(p.ac[acx]) + uint32(acs)
+            alu += uint32(n.ac[acx]) + uint32(acs)
         case 7: // AND
-            alu += uint32(p.ac[acx])&uint32(acs)
+            alu += uint32(n.ac[acx])&uint32(acs)
         }
 
         // Perform shift IR<8,9> and extract carry
@@ -132,40 +150,40 @@ func (p *Nova) Step(trace bool) Status {
         switch (ir&000007) >> 0 {
         case 0:
         case 1: // SKP
-            p.pc++
+            n.pc++
         case 2: // SZC
             if c == 0 {
-                p.pc++
+                n.pc++
             }
         case 3: // SNC
             if c == 1 {
-                p.pc++
+                n.pc++
             }
         case 4: // SZR
             if alu == 0 {
-                p.pc++
+                n.pc++
             }
         case 5: // SNR
             if alu != 0 {
-                p.pc++
+                n.pc++
             }
         case 6: // SEZ
             if c == 0 || alu == 0 {
-                p.pc++
+                n.pc++
             }
         case 7: // SBN
             if c == 1 && alu != 0 {
-                p.pc++
+                n.pc++
             }
         }
 
         // Save result IR<12>
         if ir&000010 == 0 {
-            p.ac[acx] = uint16(alu)
+            n.ac[acx] = uint16(alu)
             if c == 1 {
-                p.flags |= cpuC
+                n.flags |= cpuC
             } else {
-                p.flags &^= cpuC
+                n.flags &^= cpuC
             }
         }
     } else if ir&060000 == 060000 {
@@ -180,31 +198,31 @@ func (p *Nova) Step(trace bool) Status {
             var halt bool
 
             switch op {
-            case 0: // NIO
-            case 1: // DIA; READS
-                p.ac[ac] = p.sr
-            case 2: // DOA
-            case 3: // DIB; INTA
-                p.ac[ac] = 0    // TODO: set interrupting device code
-            case 4: // DOB; MSKO
-                // TODO: ac to priority mask
-            case 5: // DIC; IORST
-                // TODO: Busy/done flags cleared; priority mask = 0
-            case 6: // DOC; HALT
+            case ioNIO:
+            case ioDIA: // READS
+                n.ac[ac] = n.sr
+            case ioDOA: 
+            case ioDIB: // INTA
+                n.ac[ac] = n.inta()
+            case ioDOB: // MSKO
+                n.msko(n.ac[ac])
+            case ioDIC: // IORST
+                n.reset()
+            case ioDOC: // HALT
                 halt = true
-            case 7: // SKP
+            case ioSKP:
                 switch f {
                 case 0: // BN
-                    if p.flags&cpuION != 0 {
-                        p.pc++
+                    if n.flags&cpuION != 0 {
+                        n.pc++
                     }
                 case 1: // BZ
-                    if p.flags&cpuION == 0 {
-                        p.pc++
+                    if n.flags&cpuION == 0 {
+                        n.pc++
                     }
                 case 2: // DN
                 case 3: // DZ
-                    p.pc++
+                    n.pc++
                 }
             }
 
@@ -212,15 +230,15 @@ func (p *Nova) Step(trace bool) Status {
                 switch f {
                 case 0:
                 case 1: // S
-                    p.flags |= cpuION;
+                    n.flags |= cpuION;
                 case 2: // C
-                    p.flags &^= cpuION;
+                    n.flags &^= cpuION;
                 case 3: // P
                 }
             }
 
             if halt {
-                return Halt
+                return cpuHalt
             }
         } else if device == 1 {
             // Pseudo device MDV
@@ -229,28 +247,28 @@ func (p *Nova) Step(trace bool) Status {
                 case 6: // DOC
                     switch f {
                     case 1: // DOCS 2,MDV; DIV
-                        if p.ac[0] >= p.ac[2] {
-                            p.flags |= cpuC
+                        if n.ac[0] >= n.ac[2] {
+                            n.flags |= cpuC
                         } else {
-                            dividend := uint32(p.ac[0]) << 16 | uint32(p.ac[1])
-                            divisor := uint32(p.ac[2])
-                            p.ac[1] = uint16(dividend/divisor)
-                            p.ac[0] = uint16(dividend%divisor)
-                            p.flags &^= cpuC
+                            dividend := uint32(n.ac[0]) << 16 | uint32(n.ac[1])
+                            divisor := uint32(n.ac[2])
+                            n.ac[1] = uint16(dividend/divisor)
+                            n.ac[0] = uint16(dividend%divisor)
+                            n.flags &^= cpuC
                         }
                     case 3: // DOCP 2,MDV; MUL
-                        product := uint32(p.ac[1])*uint32(p.ac[2]) + uint32(p.ac[0])
-                        p.ac[0] = uint16(product >> 16)
-                        p.ac[1] = uint16(product)
+                        product := uint32(n.ac[1])*uint32(n.ac[2]) + uint32(n.ac[0])
+                        n.ac[0] = uint16(product >> 16)
+                        n.ac[1] = uint16(product)
                     }
                 case 7: // SKP
                     switch f {
                     case 0: // BN
                     case 1: // BZ
-                        p.pc++
+                        n.pc++
                     case 2: // DN
                     case 3: // DZ
-                        p.pc++
+                        n.pc++
                     }
                 }
             }
@@ -261,10 +279,10 @@ func (p *Nova) Step(trace bool) Status {
                 switch f {
                 case 0: // BN
                 case 1: // BZ
-                    p.pc++
+                    n.pc++
                 case 2: // DN
                 case 3: // DZ
-                    p.pc++
+                    n.pc++
                 }
             }
         }
@@ -280,35 +298,30 @@ func (p *Nova) Step(trace bool) Status {
         switch (ir&001400) >> 8 {
         case 0: // Page zero
         case 1: // PC relative
-            addr = p.pc - 1 + disp
+            addr = n.pc - 1 + disp
         case 2: // AC2 relative
-            addr = p.ac[2] + disp
+            addr = n.ac[2] + disp
         case 3: // AC3 relative
-            addr = p.ac[3] + disp
+            addr = n.ac[3] + disp
         }
 
         // Handle indirect reference IR<5>
         if ir&002000 != 0 {
-            if addr >= 020 && addr < 030 {
-                // Auto incrementing address
-                p.memory[addr]++
-                addr = p.memory[addr]
-            } else if addr >= 030 && addr < 040 {
-                // Auto decrementing address
-                p.memory[addr]--
-                addr = p.memory[addr]
-            } else {
-                // Follow indirection chain
-                var i int
-                for {
-                    addr = p.memory[addr&kAddrMask]
-                    if addr&(1 << 15) == 0 {
-                        break
-                    }
-                    i++
-                    if i == k32K {
-                        return IndirectLoop
-                    }
+            for {
+                next := n.m[addr&kAddrMask]
+                bit0 := next&(1 << 15)
+                if addr >= 020 && addr < 030 {
+                    // Auto incrementing address
+                    next++
+                    n.m[addr] = next
+                } else if addr >= 030 && addr < 040 {
+                    // Auto decrementing address
+                    next--
+                    n.m[addr] = next
+                }
+                addr = next
+                if bit0 == 0 {
+                    break
                 }
             }
         }
@@ -318,19 +331,19 @@ func (p *Nova) Step(trace bool) Status {
             // Without accumulator IR<3,4>
             switch (ir&014000) >> 11 {
             case 0: // JMP
-                p.pc = addr
+                n.pc = addr
             case 1: // JSR
-                p.ac[3] = p.pc
-                p.pc = addr
+                n.ac[3] = n.pc
+                n.pc = addr
             case 2: // ISZ
-                p.memory[addr&kAddrMask]++
-                if p.memory[addr&kAddrMask] == 0 {
-                    p.pc++
+                n.m[addr&kAddrMask]++
+                if n.m[addr&kAddrMask] == 0 {
+                    n.pc++
                 }
             case 3: // DSZ
-                p.memory[addr&kAddrMask]--
-                if p.memory[addr&kAddrMask] == 0 {
-                    p.pc++
+                n.m[addr&kAddrMask]--
+                if n.m[addr&kAddrMask] == 0 {
+                    n.pc++
                 }
             }
         } else {
@@ -338,57 +351,56 @@ func (p *Nova) Step(trace bool) Status {
             acx := (ir&014000) >> 11
             switch (ir&060000) >> 13 {
             case 1:   // LDA
-                p.ac[acx] = p.memory[addr&kAddrMask]
+                n.ac[acx] = n.m[addr&kAddrMask]
             case 2:   // STA
-                p.memory[addr&kAddrMask] = p.ac[acx]
+                n.m[addr&kAddrMask] = n.ac[acx]
             }
         }
     }
 
-    // Handle data channel requests
-    // Handle pending interrupts
-
-    return Run
+    return cpuRun
 }
 
-// Run program at "addr"
-func (p *Nova) Run(addr int, trace bool) {
-    p.pc = uint16(addr)&kAddrMask
-    for {
-        switch p.Step(trace) {
-        case Run:
-            continue
-        case Halt:
-            fmt.Printf("program halt: %06o\n", (p.pc - 1) & kAddrMask)
-        case IndirectLoop:
-            fmt.Printf("infinite indirection\n")
-        }
-        break
+// Reset the processor
+func (n *Nova) reset() {
+    n.flags &^= cpuION
+
+    // Assert IORST
+    for _, d := range n.devices {
+        d.reset()
     }
 }
 
-// Load program at "addr"
-func (p *Nova) LoadMemory(addr int, words []uint16) {
-    copy(p.memory[uint16(addr)&kAddrMask:], words)
+// Assert MSKO
+func (n *Nova) msko(mask uint16) {
+    for _, d := range n.devices {
+        d.msko(mask)
+    }
 }
 
-// Simulate pressing the "RESET" switch
-func (p *Nova) Reset() {
-    p.flags &^= cpuION
-    // IORST pulse
+// Assert INTA
+func (n *Nova) inta() uint16 {
+    var num uint16
+    for _, d := range n.devices {
+        if d.inta() {
+            num = d.num
+            break
+        }
+    }
+    return num
 }
 
-func (p *Nova) SetPC(addr uint16) {
-    p.pc = addr&kAddrMask
+func (n *Nova) setINTR(dev uint16) {
+    n.intReq |= (1 << dev)
 }
 
-func (p *Nova) SetSR(data uint16) {
-    p.sr = data
+func (n *Nova) clrINTR(dev uint16) {
+    n.intReq &^= (1 << dev)
 }
 
 // Simulate pressing the "PROGRAM LOAD" switch
-func (p *Nova) ProgramLoad(device int, trace bool) {
-    var code = []uint16{
+func (n *Nova) loadBootstrapLoader() {
+    var loader = [...]uint16{
         000: 0062677,
         001: 0060477,
         002: 0024026,
@@ -420,22 +432,8 @@ func (p *Nova) ProgramLoad(device int, trace bool) {
         034: 0000030,
         035: 0125300,
         036: 0001400,
-        037: 0000000 }
-    addr := 0
-    p.LoadMemory(addr, code)
-    p.sr = uint16(device)
-    p.Run(addr, trace)
-}
-
-func (p *Nova) State() string {
-    var c int
-    if p.flags&cpuC != 0 {
-        c = 1
+        037: 0000000,
     }
-    ir := p.memory[p.pc&kAddrMask]
-    var ion int
-    if p.flags&cpuION != 0 {
-        ion = 1
-    }
-    return fmt.Sprintf("%05o %06o  %06o %06o %06o %06o  %d %d ; %s", p.pc, ir, p.ac[0], p.ac[1], p.ac[2], p.ac[3], c, ion, DisasmWord(ir))
+    n.LoadMemory(0, loader[:])
+    n.pc = 0
 }

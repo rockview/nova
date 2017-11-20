@@ -23,6 +23,8 @@
 package nova
 
 import (
+    "time"
+
     "testing"
 )
 
@@ -33,6 +35,8 @@ func TestLogic(t *testing.T) {
     //
     // Start address 0376. This test has been modified so that on successfully making one full test pass, the
     // test executes a HALT instruction at address 03443 (PC=03444).
+    //
+    // The lable comments below, match those in the program listing of the linked document, above.
     //
     program := [...]uint16 {
         00000: 0000000,
@@ -1879,7 +1883,7 @@ func TestLogic(t *testing.T) {
         03312: 0152520,
         03313: 0024160,
         03314: 0073301,
-        03315: 0034063,
+        03315: 0034160,
         03316: 0101005,
         03317: 0166414,
         03320: 0063077,
@@ -1978,10 +1982,20 @@ func TestLogic(t *testing.T) {
         03442: 0000401,
         03443: 0063077, // HALT ; successful pass
 
-        // Orig: 03443: 0002170, JMP @LADDR ; start new pass
-        }
+        // Orig: 03443: 0002170, JMP @LADDR ; start new pass 
+    }
+    startAddr := 00376
+    haltAddr := 03444
 
-    p := NewNova()
-    p.LoadMemory(0, program[:])
-    p.Run(0376, true)
+    n := NewNova()
+    n.LoadMemory(0, program[:])
+    n.Start(startAddr)
+    if n.WaitForHalt(time.Millisecond * 500) != nil {
+        n.Stop()
+        t.Error("machine did not halt")
+    }
+    addr := n.Stop()
+    if addr != haltAddr {
+        t.Errorf("have: %05o, want: %05o", addr, haltAddr)
+    }
 }
