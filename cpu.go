@@ -201,7 +201,7 @@ func (n *Nova) step() int {
             case ioNIO:
             case ioDIA: // READS
                 n.ac[ac] = n.sr
-            case ioDOA: 
+            case ioDOA:
             case ioDIB: // INTA
                 n.ac[ac] = n.inta()
             case ioDOB: // MSKO
@@ -226,7 +226,7 @@ func (n *Nova) step() int {
                 }
             }
 
-            if op != 7 {
+            if op != ioSKP {
                 switch f {
                 case 0:
                 case 1: // S

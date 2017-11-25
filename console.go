@@ -72,16 +72,20 @@ func (n *Nova) Continue() {
 }
 
 // InstStep implements the console INST STEP function. The current instruction
-// is executed and then the processor is stopped and the current value of the
-// program counter is returned. If the processor is running, no instruction is
-// executed and an error is returned.
-func (n *Nova) InstStep() (int, error) {
+// is executed and the processor is stopped. The current value of the program
+// counter and an indication of whether a HALT instruction was executed are
+// returned (0: no halt, 1: halt). If the processor is running, no instruction
+// is executed and an error is returned.
+func (n *Nova) InstStep() (pc, halt int, err error) {
     n.cmd <- message{typ:cmdInstStep}
     ack := <-n.ack
     if ack.typ == ackRunning {
-        return 0, fmt.Errorf("processor running")
+        err = fmt.Errorf("processor running")
+        return
     }
-    return int(ack.addr), nil
+    pc = int(ack.addr)
+    halt = int(ack.data)
+    return
 }
 
 // TODO: implement and document
@@ -171,19 +175,22 @@ func (n *Nova) LoadMemory(addr int, words []uint16) error {
     return nil
 }
 
-func (n *Nova) trace(addr int) error {
+func (n *Nova) Trace(addr int) (int, error) {
     _, err := n.Examine(addr)   // Load PC
     if err != nil {
-        return err
+        return 0, err
     }
     for {
-        _, err := n.InstStep()
+        ad, halt, err := n.InstStep()
         if err != nil {
-            return err
+            return 0, err
+        }
+        if halt == 1 {
+            return int(ad), nil
         }
         state, _ := n.State()
         if err != nil {
-            return err
+            return 0, err
         }
         fmt.Println(state)
     }
@@ -270,8 +277,11 @@ func (n *Nova) stopped() {
             n.ack <- message{typ:ackRunning}
             return
         case cmdInstStep:
-            n.step()
-            n.ack <- message{typ:ackStopped, addr:n.pc}
+            var halt uint16
+            if n.step() == cpuHalt {
+                halt = 1
+            }
+            n.ack <- message{typ:ackStopped, addr:n.pc, data:halt}
         case cmdDeposit:
             n.pc = cmd.addr
             n.m[n.pc&kAddrMask] = cmd.data

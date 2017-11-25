@@ -138,7 +138,7 @@ func TestRunningKeys(t *testing.T) {
         t.Error("have: false, want: true")
     }
 
-    _, err := n.InstStep()
+    _, _, err := n.InstStep()
     if err == nil {
         t.Error("have: nil, want: err")
     }
@@ -170,7 +170,7 @@ func TestInstStep(t *testing.T) {
     program := [...]uint16 {
         00000: 0000401, // JMP .+1
         00001: 0000401, // JMP .+1
-        00002: 0000000, // JMP 0
+        00002: 0063077, // HALT
     }
     n := NewNova()
     err := n.LoadMemory(0, program[:])
@@ -180,12 +180,16 @@ func TestInstStep(t *testing.T) {
 
     n.Examine(0)    // Load PC
     for addr := 0; addr < 3; addr++ {
-        pc, err := n.InstStep()
+        pc, halt, err := n.InstStep()
         if err != nil {
             t.Error(err)
         }
-        want := (addr + 1)%3
+        want := addr + 1
         if pc != want {
+            t.Errorf("have: %05o, want: %05o", pc, want)
+        }
+        want = 3
+        if halt == 1 && pc != want {
             t.Errorf("have: %05o, want: %05o", pc, want)
         }
     }

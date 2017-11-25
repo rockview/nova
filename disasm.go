@@ -292,10 +292,10 @@ func DisasmWord(ir uint16) string {
             fmt.Fprintf(&operands, ".%+o", int8(disp))
         case 2:
             // AC2 relative
-            fmt.Fprintf(&operands, "%o,2", disp)
+            fmt.Fprintf(&operands, "%o,2", int8(disp))
         case 3:
             // AC3 relative
-            fmt.Fprintf(&operands, "%o,3", disp)
+            fmt.Fprintf(&operands, "%o,3", int8(disp))
         }
     }
 
@@ -309,8 +309,8 @@ func min(x, y int) int {
     return y
 }
 
-// DisasmWords disassembles "count" instruction words from the "code" slice starting from element "start".
-func DisasmWords(code []uint16, start, count int) {
+// DisasmBlock disassembles "count" instruction words from the "code" slice starting from element "start".
+func DisasmBlock(code []uint16, start, count int) {
     limit := min(len(code), start + count)
     for addr := start; addr < limit; addr++ {
         word := code[addr]
