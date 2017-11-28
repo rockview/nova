@@ -29,6 +29,9 @@ ftp://bitsavers.informatik.uni-stuttgart.de/pdf/dg/014-000631_NovaLinePgmg_Jul79
 This implementation supports the following devices:
 
 TODO: list supported devices, memory, etc.
+
+Note: when the current value of the program counter is returned by a console
+function it will typically point to the next instruction to be executed.
 */
 package nova
 
@@ -42,99 +45,100 @@ import (
 // mask, and all Busy and Done flags are set to 0. Reset has no effect if the
 // processor is stopped. The current value of the program counter is returned.
 func (n *Nova) Reset() int {
-    n.cmd <- message{typ:cmdReset}
-    ack := <-n.ack
-    return int(ack.addr)
+    n.con <- conmsg{typ:conReset}
+    con := <-n.con
+    return int(con.addr)
 }
 
 // Stop implements the console STOP function. The processor is stopped at the
 // end of the current instruction. Stop has no effect if the processor is
 // stopped. The current value of the program counter is returned.
 func (n *Nova) Stop() int {
-    n.cmd <- message{typ:cmdStop}
-    ack := <-n.ack
-    return int(ack.addr)
+    n.con <- conmsg{typ:conStop}
+    con := <-n.con
+    return int(con.addr)
 }
 
-// Start implements the console START function. "addr" is loaded into the
-// program counter and execution begins at that address. Start has no effect if
-// the processor is running.
+// Start implements the console START function. addr is loaded into the program
+// counter and execution begins at that address. Start has no effect if the
+// processor is running.
 func (n *Nova) Start(addr int) {
-    n.cmd <- message{typ:cmdStart, addr:uint16(addr)}
-    <-n.ack
+    n.con <- conmsg{typ:conStart, addr:uint16(addr)}
+    <-n.con
 }
 
 // Continue implements the console CONTINUE function. Execution resumes from the
 // current machine state. Continue has no effect if the processor is running.
 func (n *Nova) Continue() {
-    n.cmd <- message{typ:cmdContinue}
-    <-n.ack
+    n.con <- conmsg{typ:conContinue}
+    <-n.con
 }
 
 // InstStep implements the console INST STEP function. The current instruction
 // is executed and the processor is stopped. The current value of the program
 // counter and an indication of whether a HALT instruction was executed are
-// returned (0: no halt, 1: halt). If the processor is running, no instruction
-// is executed and an error is returned.
+// returned. halt will have the value 1 if a halt was executed, 0 otheriwse. If
+// the processor is running, no instruction is executed and an error is
+// returned.
 func (n *Nova) InstStep() (pc, halt int, err error) {
-    n.cmd <- message{typ:cmdInstStep}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conInstStep}
+    con := <-n.con
+    if con.typ == conRunning {
         err = fmt.Errorf("processor running")
         return
     }
-    pc = int(ack.addr)
-    halt = int(ack.data)
+    pc = int(con.addr)
+    halt = int(con.data)
     return
 }
 
 // TODO: implement and document
 func (n *Nova) ProgramLoad() error {
-    n.cmd <- message{typ:cmdProgramLoad}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conProgramLoad}
+    con := <-n.con
+    if con.typ == conRunning {
         return fmt.Errorf("processor running")
     }
     return nil
 }
 
 // Deposit implements the console DEPOSIT function. The program counter is
-// loaded with "addr", and "data" is stored in memory at the address specified
-// by the program counter. If the processor is running, no store occurs and an
+// loaded with addr, and data is stored in memory at the address specified by
+// the program counter. If the processor is running, no store occurs and an
 // error is returned.
 func (n *Nova) Deposit(addr, data int) error {
-    n.cmd <- message{typ:cmdDeposit, addr:uint16(addr), data:uint16(data)}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conDeposit, addr:uint16(addr), data:uint16(data)}
+    con := <-n.con
+    if con.typ == conRunning {
         return fmt.Errorf("processor running")
     }
     return nil
 }
 
 // DepositNext implements the console DEPOSIT NEXT function. The program counter
-// is incremented and "data" is stored in memory at the address specified by the
+// is incremented and data is stored in memory at the address specified by the
 // program counter. If the processor is running, no store occurs and an error is
 // returned.
 func (n *Nova) DepositNext(data int) error {
-    n.cmd <- message{typ:cmdDepositNext, data:uint16(data)}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conDepositNext, data:uint16(data)}
+    con := <-n.con
+    if con.typ == conRunning {
         return fmt.Errorf("processor running")
     }
     return nil
 }
 
 // Examine implements the console EXAMINE function. The program counter is
-// loaded with "addr" and the contents of memory at the address specified by the
+// loaded with addr and the contents of memory at the address specified by the
 // program counter is returned. If the processor is running, the program counter
 // is not modified and an error is returned.
 func (n *Nova) Examine(addr int) (int, error) {
-    n.cmd <- message{typ:cmdExamine, addr:uint16(addr)}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conExamine, addr:uint16(addr)}
+    con := <-n.con
+    if con.typ == conRunning {
         return 0, fmt.Errorf("processor running")
     }
-    return int(ack.data), nil
+    return int(con.data), nil
 
 }
 
@@ -143,44 +147,52 @@ func (n *Nova) Examine(addr int) (int, error) {
 // program counter is returned. If the processor is running, the program counter
 // is not modified and an error is returned.
 func (n *Nova) ExamineNext() (int, error) {
-    n.cmd <- message{typ:cmdExamineNext}
-    ack := <-n.ack
-    if ack.typ == ackRunning {
+    n.con <- conmsg{typ:conExamineNext}
+    con := <-n.con
+    if con.typ == conRunning {
         return 0, fmt.Errorf("processor running")
     }
-    return int(ack.data), nil
+    return int(con.data), nil
 }
 
 // Switches implements the console data switches function. The switch register
-// is loaded with "data".
+// is loaded with data.
 func (n *Nova) Switches(data int) {
-    n.cmd <- message{typ:cmdSwitches, data:uint16(data)}
-    <-n.ack
+    n.con <- conmsg{typ:conSwitches, data:uint16(data)}
+    <-n.con
 }
 
 // IsRunning indicates whether to processor is currently running.
 func (n *Nova) IsRunning() bool {
-    n.cmd <- message{typ:cmdStatus}
-    ack := <-n.ack
-    return ack.typ == ackRunning
+    n.con <- conmsg{typ:conStatus}
+    con := <-n.con
+    return con.typ == conRunning
 }
 
-// LoadMemory copies the "words" slice to memory starting from "addr".  If the
+// LoadMemory copies the words slice to memory starting from addr.  If the
 // processor is running, memory remains unchanged and an error is returned.
 func (n *Nova) LoadMemory(addr int, words []uint16) error {
     if n.IsRunning() {
         return fmt.Errorf("processor running")
     }
-    copy(n.m[uint16(addr)&kAddrMask:], words)
+    copy(n.m[addr&kAddrMask:], words)
     return nil
 }
 
+// Trace shows the processor state before each instuction is executed beginning
+// with the instruction at addr. If the processor is running, no instruction is
+// executed and an error is returned.
 func (n *Nova) Trace(addr int) (int, error) {
     _, err := n.Examine(addr)   // Load PC
     if err != nil {
         return 0, err
     }
     for {
+        state, _ := n.State()
+        if err != nil {
+            return 0, err
+        }
+        fmt.Println(state)
         ad, halt, err := n.InstStep()
         if err != nil {
             return 0, err
@@ -188,16 +200,12 @@ func (n *Nova) Trace(addr int) (int, error) {
         if halt == 1 {
             return int(ad), nil
         }
-        state, _ := n.State()
-        if err != nil {
-            return 0, err
-        }
-        fmt.Println(state)
     }
 }
 
 // State returns the processor state as a string having the following format:
-// PC IR  AC[0] AC[1] AC[2] AC[3]  C ION ; <disassembled IR>
+// PC IR  AC[0] AC[1] AC[2] AC[3]  C ION ; <disassembled IR>. Note: the state
+// prior to the execution of the indicated instruction is returned.
 func (n *Nova) State() (string, error) {
     if n.IsRunning() {
         return "", fmt.Errorf("processor running")
@@ -215,41 +223,46 @@ func (n *Nova) State() (string, error) {
         n.pc, ir, n.ac[0], n.ac[1], n.ac[2], n.ac[3], carry, ion, DisasmWord(ir)), nil
 }
 
-// WaitForHalt waits for the processor to halt. If the processor fails to halt
-// within the specified "timeout" period, an error is returned.
-func (n *Nova) WaitForHalt(timeout time.Duration) error {
+// WaitForHalt waits for the processor to halt. If the processor halted within
+// the timeout period the current value of the program counter is returned. An
+// error is returned if the processor fails to halt within the timeout period.
+func (n *Nova) WaitForHalt(timeout time.Duration) (int, error) {
     select {
     case <- time.After(timeout):
-        return fmt.Errorf("timed out")
+        return 0, fmt.Errorf("timed out")
     case <- n.halt:
-        return nil
+        return int(n.pc), nil
     }
 }
 
 const (
-    cmdReset int = iota
-    cmdStop
-    cmdStart
-    cmdContinue
-    cmdInstStep
-    cmdDeposit
-    cmdDepositNext
-    cmdExamine
-    cmdExamineNext
-    cmdProgramLoad
-    cmdSwitches
-    cmdStatus
+    // Request
+    conReset int = iota
+    conStop
+    conStart
+    conContinue
+    conInstStep
+    conDeposit
+    conDepositNext
+    conExamine
+    conExamineNext
+    conProgramLoad
+    conSwitches
+    conStatus
 
-    ackStopped
-    ackRunning
+    // Response
+    conStopped
+    conRunning
 )
 
-type message struct {
+// Console message
+type conmsg struct {
     typ int
     addr uint16
     data uint16
 }
 
+// Initialize the processor prior to running.
 func (n *Nova) initRun() {
     select {
     case <-n.halt:
@@ -257,77 +270,77 @@ func (n *Nova) initRun() {
     }
 }
 
-// CPU stopped; waiting for key
+// Processor stopped; waiting for key
 func (n *Nova) stopped() {
     for {
-        cmd := <-n.cmd
-        switch cmd.typ {
-        case cmdReset:
+        msg := <-n.con
+        switch msg.typ {
+        case conReset:
             n.reset()
-            n.ack <- message{typ:ackStopped, addr:n.pc}
-        case cmdStop:
-            n.ack <- message{typ:ackStopped, addr:n.pc}
-        case cmdStart:
+            n.con <- conmsg{typ:conStopped, addr:n.pc}
+        case conStop:
+            n.con <- conmsg{typ:conStopped, addr:n.pc}
+        case conStart:
             n.initRun()
-            n.pc = cmd.addr
-            n.ack <- message{typ:ackRunning}
+            n.pc = msg.addr
+            n.con <- conmsg{typ:conRunning}
             return
-        case cmdContinue:
+        case conContinue:
             n.initRun()
-            n.ack <- message{typ:ackRunning}
+            n.con <- conmsg{typ:conRunning}
             return
-        case cmdInstStep:
+        case conInstStep:
             var halt uint16
             if n.step() == cpuHalt {
                 halt = 1
             }
-            n.ack <- message{typ:ackStopped, addr:n.pc, data:halt}
-        case cmdDeposit:
-            n.pc = cmd.addr
-            n.m[n.pc&kAddrMask] = cmd.data
-            n.ack <- message{typ:ackStopped}
-        case cmdDepositNext:
+            n.con <- conmsg{typ:conStopped, addr:n.pc, data:halt}
+        case conDeposit:
+            n.pc = msg.addr
+            n.m[n.pc&kAddrMask] = msg.data
+            n.con <- conmsg{typ:conStopped}
+        case conDepositNext:
             n.pc++
-            n.m[n.pc&kAddrMask] = cmd.data
-            n.ack <- message{typ:ackStopped}
-        case cmdExamine:
-            n.pc = cmd.addr
-            n.ack <- message{typ:ackStopped, data:n.m[n.pc&kAddrMask]}
-        case cmdExamineNext:
+            n.m[n.pc&kAddrMask] = msg.data
+            n.con <- conmsg{typ:conStopped}
+        case conExamine:
+            n.pc = msg.addr
+            n.con <- conmsg{typ:conStopped, data:n.m[n.pc&kAddrMask]}
+        case conExamineNext:
             n.pc++
-            n.ack <- message{typ:ackStopped, data:n.m[n.pc&kAddrMask]}
-        case cmdSwitches:
-            n.sr = cmd.data
-            n.ack <- message{typ:ackStopped}
-        case cmdProgramLoad:
+            n.con <- conmsg{typ:conStopped, data:n.m[n.pc&kAddrMask]}
+        case conSwitches:
+            n.sr = msg.data
+            n.con <- conmsg{typ:conStopped}
+        case conProgramLoad:
             n.initRun()
             n.loadBootstrapLoader()
-            n.ack <- message{typ:ackRunning}
+            n.con <- conmsg{typ:conRunning}
             return
-        case cmdStatus:
-            n.ack <- message{typ:ackStopped}
+        case conStatus:
+            n.con <- conmsg{typ:conStopped}
         }
     }
 }
 
-// CPU running; run until key or halt
+// Processor running; run until key or halt
 func (n *Nova) running() {
     for {
         select {
-        case cmd := <-n.cmd:
-            switch cmd.typ {
-            case cmdReset:
+        case msg := <-n.con:
+            switch msg.typ {
+            case conReset:
                 n.reset()
-                n.ack <- message{typ:ackStopped, addr:n.pc}
+                n.con <- conmsg{typ:conStopped, addr:n.pc}
                 return
-            case cmdStop:
-                n.ack <- message{typ:ackStopped, addr:n.pc}
+            case conStop:
+                n.con <- conmsg{typ:conStopped, addr:n.pc}
                 return
-            case cmdSwitches:
-                n.sr = cmd.data
-                n.ack <- message{typ:ackStopped}
-            case cmdStart, cmdContinue, cmdInstStep, cmdDeposit, cmdDepositNext, cmdExamine, cmdExamineNext, cmdProgramLoad, cmdStatus:
-                n.ack <- message{typ:ackRunning}
+            case conSwitches:
+                n.sr = msg.data
+                n.con <- conmsg{typ:conStopped}
+            case conStart, conContinue, conInstStep, conDeposit, conDepositNext, conExamine, conExamineNext, conProgramLoad, conStatus:
+                n.con <- conmsg{typ:conRunning}
             }
         default:
             if n.step() == cpuHalt {

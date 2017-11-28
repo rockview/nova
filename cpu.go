@@ -22,16 +22,7 @@
 
 package nova
 
-const (
-    ioNIO uint16 = iota
-    ioDIA
-    ioDOA
-    ioDIB
-    ioDOB
-    ioDIC
-    ioDOC
-    ioSKP
-)
+import "sync"
 
 const (
     k32K        = 1<<15
@@ -42,6 +33,7 @@ const (
 const (
     cpuC uint   = 1<<iota   // Carry
     cpuION                  // Interrupts enabled
+    cpuPendingION           // Set ION at start of next instruction
 )
 
 // CPU state
@@ -50,11 +42,12 @@ type Nova struct {
     ac [4]uint16                // Accumulators
     flags uint                  // Processor flags
     m [k32K]uint16              // 32KW memory
-    devices map[uint16]*device  // Devices
-    intReq uint64               // Interrupting devices
+    devices map[uint16]device   // Devices
+    mu sync.Mutex
+    interrupts uint64           // Interrupting devices
+    intdisable uint64           // Interrupt disables
     sr uint16                   // Switch register
-    cmd chan message            // Console command
-    ack chan message            // Console acknowlege
+    con chan conmsg             // Console channel
     halt chan struct{}          // Signals machine HALT
 }
 
@@ -67,20 +60,23 @@ const (
 // and the interrupt on flag, the 16-bit priority mask, and all busy and done
 // flags are set to 0.
 func NewNova() *Nova {
-    nova := Nova{
-        devices: make(map[uint16]*device),
-        cmd: make(chan message),
-        ack: make(chan message),
+    n := &Nova{
+        devices: make(map[uint16]device),
+        con: make(chan conmsg),
         halt: make(chan struct{}),
     }
-    go nova.processor()
-    return &nova
+    dev := newRTC(n, 60)
+    n.devices[dev.num] = dev
+    go n.processor()
+    return n
 }
 
 // Execute one instruction.
 func (n *Nova) step() int {
-    // Handle data channel requests
-    // Handle pending interrupts
+    if (n.flags&cpuPendingION) != 0 {
+        n.flags &^= cpuPendingION
+        n.flags |= cpuION
+    }
 
     // Fetch next instruction
     ir := n.m[n.pc&kAddrMask]
@@ -188,12 +184,12 @@ func (n *Nova) step() int {
         }
     } else if ir&060000 == 060000 {
         // I/O transfer IR<1,2>
-        ac :=     (ir&0014000) >> 11
-        op :=     (ir&0003400) >> 8
-        f :=      (ir&0000300) >> 6
-        device := (ir&0000077) >> 0
+        ac :=  (ir&0014000) >> 11
+        op :=  (ir&0003400) >> 8
+        f :=   (ir&0000300) >> 6
+        num := (ir&0000077) >> 0
 
-        if device == 077 {
+        if num == numCPU {
             // Pseudo device CPU
             var halt bool
 
@@ -230,7 +226,9 @@ func (n *Nova) step() int {
                 switch f {
                 case 0:
                 case 1: // S
-                    n.flags |= cpuION;
+                    if (n.flags&cpuION) == 0 {
+                        n.flags |= cpuPendingION;
+                    }
                 case 2: // C
                     n.flags &^= cpuION;
                 case 3: // P
@@ -240,11 +238,11 @@ func (n *Nova) step() int {
             if halt {
                 return cpuHalt
             }
-        } else if device == 1 {
+        } else if num == numMDV {
             // Pseudo device MDV
             if ac == 2 {
                 switch op {
-                case 6: // DOC
+                case ioDOC:
                     switch f {
                     case 1: // DOCS 2,MDV; DIV
                         if n.ac[0] >= n.ac[2] {
@@ -261,28 +259,34 @@ func (n *Nova) step() int {
                         n.ac[0] = uint16(product >> 16)
                         n.ac[1] = uint16(product)
                     }
-                case 7: // SKP
+                case ioSKP:
                     switch f {
-                    case 0: // BN
-                    case 1: // BZ
-                        n.pc++
-                    case 2: // DN
-                    case 3: // DZ
+                    case ioBZ, ioDZ:
                         n.pc++
                     }
                 }
             }
         } else {
-            // All other devices
-            if op == 7 {
-                // SKP
-                switch f {
-                case 0: // BN
-                case 1: // BZ
-                    n.pc++
-                case 2: // DN
-                case 3: // DZ
-                    n.pc++
+            dev := n.devices[num]
+            if dev == nil {
+                // Device not present
+                switch op {
+                case ioSKP:
+                    switch f {
+                    case ioBZ, ioDZ:
+                        n.pc++
+                    }
+                }
+            } else {
+                switch op {
+                case ioNIO, ioDIA, ioDIB, ioDIC:
+                    n.ac[ac] = dev.read(op, f)
+                case ioDOA, ioDOB, ioDOC:
+                    dev.write(op, f, n.ac[ac])
+                case ioSKP:
+                    if dev.test(f) {
+                        n.pc++
+                    }
                 }
             }
         }
@@ -307,23 +311,7 @@ func (n *Nova) step() int {
 
         // Handle indirect reference IR<5>
         if ir&002000 != 0 {
-            for {
-                next := n.m[addr&kAddrMask]
-                bit0 := next&(1 << 15)
-                if addr >= 020 && addr < 030 {
-                    // Auto incrementing address
-                    next++
-                    n.m[addr] = next
-                } else if addr >= 030 && addr < 040 {
-                    // Auto decrementing address
-                    next--
-                    n.m[addr] = next
-                }
-                addr = next
-                if bit0 == 0 {
-                    break
-                }
-            }
+            addr = n.loadAddr(addr)
         }
 
         // Perform operation
@@ -358,44 +346,91 @@ func (n *Nova) step() int {
         }
     }
 
+    // Handle data channel requests
+
+    // Handle pending interrupts
+    if (n.flags&cpuION) != 0 {
+        n.mu.Lock()
+        if (n.interrupts&^n.intdisable) != 0 {
+            n.flags &^= cpuION
+            n.m[0] = n.pc
+            n.pc = n.loadAddr(1)
+        }
+        n.mu.Unlock()
+    }
+
     return cpuRun
 }
 
-// Reset the processor
-func (n *Nova) reset() {
-    n.flags &^= cpuION
+func (n *Nova) loadAddr(addr uint16) uint16 {
+    for {
+        next := n.m[addr&kAddrMask]
+        bit0 := next&(1 << 15)
+        if addr >= 020 && addr < 030 {
+            // Auto incrementing address
+            next++
+            n.m[addr] = next
+        } else if addr >= 030 && addr < 040 {
+            // Auto decrementing address
+            next--
+            n.m[addr] = next
+        }
+        addr = next
+        if bit0 == 0 {
+            break
+        }
+    }
+    return addr
+}
 
+// Reset the processor and devices
+func (n *Nova) reset() {
     // Assert IORST
     for _, d := range n.devices {
         d.reset()
     }
+
+    n.flags &^= cpuION
+    n.mu.Lock()
+    n.interrupts = 0
+    n.mu.Unlock()
+    n.intdisable = 0
 }
 
 // Assert MSKO
 func (n *Nova) msko(mask uint16) {
+    var flags uint64
     for _, d := range n.devices {
-        d.msko(mask)
+        if mask&(1 << d.priority()) != 0 {
+            flags |= (1 << d.code())
+        }
     }
+    n.intdisable = flags
 }
 
 // Assert INTA
+// TODO: define the order of query
 func (n *Nova) inta() uint16 {
-    var num uint16
+    n.mu.Lock()
+    defer n.mu.Unlock()
     for _, d := range n.devices {
-        if d.inta() {
-            num = d.num
-            break
+        if (n.interrupts&(1 << d.code())) != 0 {
+            return d.code()
         }
     }
-    return num
+    return 0
 }
 
-func (n *Nova) setINTR(dev uint16) {
-    n.intReq |= (1 << dev)
+func (n *Nova) setInt(num uint16) {
+    n.mu.Lock()
+    n.interrupts |= (1 << num)
+    n.mu.Unlock()
 }
 
-func (n *Nova) clrINTR(dev uint16) {
-    n.intReq &^= (1 << dev)
+func (n *Nova) clearInt(num uint16) {
+    n.mu.Lock()
+    n.interrupts &^= (1 << num)
+    n.mu.Unlock()
 }
 
 // Simulate pressing the "PROGRAM LOAD" switch

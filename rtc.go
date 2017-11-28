@@ -22,38 +22,58 @@
 
 package nova
 
-type devRTC struct {
-    device
-    lineFreq int
-    freq int
+import "time"
+
+type rtc struct {
+    controller
 }
 
-func newRTC(n *Nova, lineFreq int) *devRTC {
+func newRTC(n *Nova, lineFreq int) *rtc {
     if lineFreq != 50 || lineFreq !=  60 {
         lineFreq = 60
     }
-    return &devRTC{
-        device: device{
+    d := &rtc{
+        controller: controller{
             num: numRTC,
-            mask: (1<<priRTC),
+            pri: priRTC,
+            dev: make(chan devmsg),
             n: n,
         },
-        lineFreq: lineFreq,
-        freq: lineFreq,
     }
+    go d.device(lineFreq)
+    return d
 }
 
-func (d *devRTC) write(op, f, ac uint16) {
-    if op == ioDOA {
-        switch ac&03 {
-        case 00:
-            d.freq = d.lineFreq
-        case 01:
-            d.freq = 10
-        case 02:
-            d.freq = 100
-        case 03:
-            d.freq = 1000
+func (d *rtc) device(lineFreq int) {
+    periods := [...]time.Duration {
+        time.Second/time.Duration(lineFreq),
+        time.Second/10,
+        time.Second/100,
+        time.Second/1000,
+    }
+    ticker := time.NewTicker(periods[0])
+    for {
+        select {
+        case msg := <-d.dev:
+            switch msg.typ {
+            case ioRST:
+                ticker.Stop()
+                ticker = time.NewTicker(periods[0])
+                d.idle()
+                d.dev <- msg
+            case ioDOA:
+                ticker.Stop()
+                ticker = time.NewTicker(periods[msg.data&03])
+                fallthrough
+            case ioNIO, ioDIA, ioDIB, ioDOB, ioDIC, ioDOC:
+                d.flags(msg)
+                d.dev <- msg
+            case ioSKP:
+                msg.data = d.skip(msg)
+                d.dev <- msg
+            }
+        case <-ticker.C:
+            d.complete()
         }
     }
 }

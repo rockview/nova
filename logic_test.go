@@ -30,14 +30,19 @@ import (
 
 func TestLogic(t *testing.T) {
 /*
- Nova 800 Logic Test, tape 095-000045-02.
+Nova 800 Logic Test, tape 095-000045-02, document: 097-000023-02.
 
- See: ftp://bitsavers.informatik.uni-stuttgart.de/pdf/dg/software/diag/097-000023-02_Nova800_Logic_Test_1971.pdf
+See: ftp://bitsavers.informatik.uni-stuttgart.de/pdf/dg/software/diag/097-000023-02_Nova800_Logic_Test_1971.pdf
 
- Start address 0376. This test has been modified so that on successfully making one full test pass, the
- test executes a HALT instruction at address 03443 (PC=03444).
+Start addresses
 
- The comments below match the labels in the program listing of the document above.
+00376: complete logic test
+00374: MUL-DIV logic test
+
+Each test will repeat indefinitely when started at either of these addresses.
+Place a HALT instruction at address 03443 to halt either test after one pass.
+
+The comments below match the labels in the program listing of the document above.
 */
     program := [...]uint16 {
         00000: 0000000,
@@ -1982,22 +1987,23 @@ func TestLogic(t *testing.T) {
         03440: 0034045,
         03441: 0011403,
         03442: 0000401,
-        03443: 0063077, // HALT ; successful pass
-
-        // Orig: 03443: 0002170, JMP @LADDR ; start new pass 
+        03443: 0002170, // JMP @170 ; start new pass 
     }
     startAddr := 00376
-    haltAddr := 03444
+    haltAddr := 03443
 
     n := NewNova()
     n.LoadMemory(0, program[:])
+
+    // Stop test after one pass
+    n.Deposit(haltAddr, 0063077)
+
     n.Start(startAddr)
-    if n.WaitForHalt(time.Millisecond * 500) != nil {
+    addr, err := n.WaitForHalt(time.Millisecond * 500)
+    if err != nil {
         n.Stop()
-        t.Error("machine did not halt")
-    }
-    addr := n.Stop()
-    if addr != haltAddr {
-        t.Errorf("have: %05o, want: %05o", addr, haltAddr)
+        t.Error("program: want: %0, have: timeout", addr)
+    } else if addr != haltAddr + 1 {
+        t.Errorf("have: %05o, want: %05o", addr, haltAddr + 1)
     }
 }

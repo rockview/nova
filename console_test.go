@@ -104,9 +104,9 @@ func TestExecution(t *testing.T) {
 
     // Start/Stop
     n.Start(1)
-    err = n.WaitForHalt(time.Millisecond * 10)
+    _, err = n.WaitForHalt(time.Millisecond * 10)
     if err == nil {
-        t.Error("program: have: halt, want: loop")
+        t.Error("program: have: halt, want: timeout")
     }
     addr := n.Stop()
     if addr != 1 {
@@ -115,9 +115,9 @@ func TestExecution(t *testing.T) {
 
     // Continue/Reset
     n.Continue()
-    err = n.WaitForHalt(time.Millisecond * 10)
+    _, err = n.WaitForHalt(time.Millisecond * 10)
     if err == nil {
-        t.Error("program: have: halt, want: loop")
+        t.Error("program: have: halt, want: timeout")
     }
     addr = n.Reset()
     if addr != 1 {
