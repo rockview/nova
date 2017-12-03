@@ -38,6 +38,7 @@ package nova
 import (
     "fmt"
     "time"
+    "io"
 )
 
 // Reset implements the console RESET function. The processor is halted at the
@@ -235,6 +236,38 @@ func (n *Nova) WaitForHalt(timeout time.Duration) (int, error) {
     }
 }
 
+func (n *Nova) Attach(code int, media interface{}) error {
+    num := uint16(code)
+
+    if n.IsRunning() {
+        return fmt.Errorf("cannot attach to running processor")
+    }
+
+    dev := n.devices[num]
+    if dev == nil {
+        return fmt.Errorf("%s: device not found", deviceName(num))
+    }
+
+    switch d := dev.(type) {
+    case inputDriver:
+        s, ok := media.(io.Reader)
+        if !ok {
+            return fmt.Errorf("%s: need io.Reader media", deviceName(num))
+        }
+        d.attach(s)
+    case outputDriver:
+        s, ok := media.(io.Writer)
+        if !ok {
+            return fmt.Errorf("%s: need io.Writer media", deviceName(num))
+        }
+        d.attach(s)
+    default:
+        return fmt.Errorf("%s: not input/output device", deviceName(num))
+    }
+
+    return nil
+}
+
 const (
     // Request
     conReset int = iota
@@ -319,6 +352,8 @@ func (n *Nova) stopped() {
             return
         case conStatus:
             n.con <- conmsg{typ:conStopped}
+        default:
+            panic("stopped: invalid message type")
         }
     }
 }
@@ -339,8 +374,11 @@ func (n *Nova) running() {
             case conSwitches:
                 n.sr = msg.data
                 n.con <- conmsg{typ:conStopped}
-            case conStart, conContinue, conInstStep, conDeposit, conDepositNext, conExamine, conExamineNext, conProgramLoad, conStatus:
+            case conStart, conContinue, conInstStep, conDeposit, conDepositNext,
+                conExamine, conExamineNext, conProgramLoad, conStatus:
                 n.con <- conmsg{typ:conRunning}
+            default:
+                panic("running: invalid message type")
             }
         default:
             if n.step() == cpuHalt {

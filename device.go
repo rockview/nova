@@ -22,17 +22,25 @@
 
 package nova
 
+import "io"
+
 // Device codes
 const (
-    numMDV = 001    // Multiply/divide
-    numTTI = 010    // Teletype input
-    numTTO = 011    // Teletype output
-    numPTR = 012    // Paper tape reader
-    numPTP = 013    // Paper type punch
-    numRTC = 014    // Real time clock
-    numMTA = 022    // Magnetic tape
-    numDKP = 033    // Moving head disk
-    numCPU = 077    // CPU
+    DevTTI = 010    // Teletype input
+    DevTTO = 011    // Teletype output
+    DevPTR = 012    // Paper tape reader
+    DevPTP = 013    // Paper type punch
+    DevMTA = 022    // Magnetic tape
+    DevDKP = 033    // Moving head disk
+
+    DevTTI1 = 050   // Second teletype input
+    DevTTO1 = 051   // Second teletype output
+    DevPTR1 = 052   // Second paper tape reader
+    DevPTP1 = 053   // Second paper type punch
+
+    devMDV = 001    // Multiply/divide
+    devRTC = 014    // Real time clock
+    devCPU = 077    // CPU
 )
 
 // Device priorities
@@ -46,27 +54,27 @@ const (
     priTTO = 15
 )
 
-// I/O instruction op codes
+// I/O op codes
 const (
-    ioNIO = iota
-    ioDIA
-    ioDOA
-    ioDIB
-    ioDOB
-    ioDIC
-    ioDOC
-    ioSKP
+    ioNIO = iota    // No I/O
+    ioDIA           // Data In A
+    ioDOA           // Data Out A
+    ioDIB           // Data In B
+    ioDOB           // Data Out B
+    ioDIC           // Data In C
+    ioDOC           // Data Out C
+    ioSKP           // Skip
 )
 
-// I/O flags
+// I/O control flags
 const (
     _ = iota
-    ioS // Start
-    ioC // Idle
+    ioS // Signal STRT
+    ioC // Signal CLR
     ioP // Pulse
 )
 
-// I/O test
+// I/O tests flags
 const (
     ioBN = iota // Test busy non-zero
     ioBZ        // Test busy zero
@@ -76,10 +84,10 @@ const (
 
 const (
     _ = iota + ioSKP
-    ioRST
+    ioRST       // Signal IORST
 )
 
-type device interface {
+type driver interface {
     code() uint16
     priority() uint16
     reset()
@@ -88,61 +96,80 @@ type device interface {
     write(op, f uint16, data uint16)
 }
 
-type devmsg struct {
-    typ uint16
-    flags uint16
-    data uint16
+type inputDriver interface {
+    driver
+    attach(w io.Reader)
 }
 
-// Device state
+type outputDriver interface {
+    driver
+    attach(w io.Writer)
+}
+
+// Device state.
 const (
     devIdle = iota
     devBusy
     devDone
 )
+
+// Device message.
+type devmsg struct {
+    typ uint16      // Message type
+    flags uint16    // Control or test flags
+    data uint16     // Other message data
+}
+
+// Device controller.
 type controller struct {
     num uint16      // Device code
     pri uint16      // Priority
     state int       // State
-    dev chan devmsg // Device channel
+    data uint16     // Transferred data
+    dev chan devmsg // Device message channel
     n *Nova         // CPU
 }
 
+// code returns device code.
 func (c *controller) code() uint16 {
     return c.num
 }
 
+// priority returns device priority.
 func (c *controller) priority() uint16 {
     return c.pri
 }
 
-// Reset device.
+// reset performs device reset.
 func (c *controller) reset() {
     c.dev <- devmsg{ioRST, 0, 0}
     <-c.dev
 }
 
-// Test device state.
+// test performs I/O SKP tests.
 func (c *controller) test(t uint16) bool {
     c.dev <- devmsg{ioSKP, t, 0}
     ack := <-c.dev
     return ack.data == 1
 }
 
-// Read word from device.
+// read performs the I/O read operation specified by op and sets the device
+// state from the flags specified by f. The data read from the device, if any,
+// is returned.
 func (c *controller) read(op, f uint16) uint16 {
     c.dev <- devmsg{op, f, 0}
     ack := <-c.dev
     return ack.data
 }
 
-// Write word to device.
+// write performs the I/O write operation specified by op on data and sets
+// the device state from the flags specified by f.
 func (c *controller) write(op, f uint16, data uint16) {
     c.dev <- devmsg{op, f, data}
     <-c.dev
 }
 
-// Set skip condition.
+// skip returns skip condition specified by message flags.
 func (c *controller) skip(msg devmsg) uint16 {
     var result uint16
     switch msg.flags {
@@ -166,27 +193,27 @@ func (c *controller) skip(msg devmsg) uint16 {
     return result
 }
 
-// Idle device.
+// idle puts the device into an idle state.
 func (c *controller) idle() {
     c.state = devIdle
     c.n.clearInt(c.num)
 }
 
-// Start I/O operation.
+// start commences I/O operation by putting the device into a busy state.
 func (c *controller) start() {
     c.state = devBusy
     c.n.clearInt(c.num)
 }
 
-// Complete I/O operation.
+// complete completes the I/O operation by putting the device into a done state.
 func (c *controller) complete() {
     if c.state == devBusy {
         c.state = devDone
         c.n.setInt(c.num)
-    } 
+    }
 }
 
-// Apply control flags.
+// flags sets the device state from the message flags.
 func (c *controller) flags(msg devmsg) {
     switch msg.flags {
     case ioS:
@@ -194,4 +221,23 @@ func (c *controller) flags(msg devmsg) {
     case ioC:
         c.idle()
     }
+}
+
+// deviceName returns the name of the device with the code num.
+func deviceName(num uint16) string {
+    return ioD[num&077]
+}
+
+// addDevices add all devices to the processor. Devices begin in an idle state
+// with no media attached.
+func (n *Nova) addDevices() {
+    n.devices[DevTTI] = newStdReader(n, DevTTI, priTTI, 10) // ASR-33
+    n.devices[DevTTO] = newStdWriter(n, DevTTO, priTTO, 10) // ASR-33
+    n.devices[DevPTR] = newStdReader(n, DevPTR, priPTR, 300) // 4011B
+    n.devices[DevPTP] = newStdWriter(n, DevPTP, priPTP, 63.3)
+    n.devices[DevTTI1] = newStdReader(n, DevTTI1, priTTI, 10) // ASR-33
+    n.devices[DevTTO1] = newStdWriter(n, DevTTO1, priTTO, 10) // ASR-33
+    n.devices[DevPTR1] = newStdReader(n, DevPTR1, priPTR, 300) // 4011B
+    n.devices[DevPTP1] = newStdWriter(n, DevPTP1, priPTP, 63.3)
+    n.devices[devRTC] = newrtc(n, 60)
 }

@@ -169,7 +169,7 @@ var ioD = [...]string{
     076: "FPU",
     077: "CPU" }
 
-// DisasmWord disassembles the instruction given by "ir".
+// DisasmWord disassembles the ir instruction.
 func DisasmWord(ir uint16) string {
     var operator bytes.Buffer
     var operands bytes.Buffer
@@ -302,18 +302,10 @@ func DisasmWord(ir uint16) string {
     return fmt.Sprintf("%-8s%s", operator.String(), operands.String())
 }
 
-func min(x, y int) int {
-    if x < y {
-        return x
-    }
-    return y
-}
-
-// DisasmBlock disassembles "count" instruction words from the "code" slice starting from element "start".
-func DisasmBlock(code []uint16, start, count int) {
-    limit := min(len(code), start + count)
+// DisasmBlock disassembles the words slice from the start element up to, but excluding, the limit element.
+func DisasmBlock(start, limit int, words []uint16) {
     for addr := start; addr < limit; addr++ {
-        word := code[addr]
+        word := words[addr]
         fmt.Printf("%05o %06o  %s\n", addr, word, DisasmWord(word))
     }
 }

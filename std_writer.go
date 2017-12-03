@@ -22,58 +22,75 @@
 
 package nova
 
-import "time"
+import (
+    "time"
+    "io"
+    "fmt"
+)
 
-type rtc struct {
+type stdWriter struct {
     controller
+    w io.Writer
 }
 
-func newrtc(n *Nova, lineFreq int) *rtc {
-    if lineFreq != 50 || lineFreq !=  60 {
-        lineFreq = 60
-    }
-    d := &rtc{
+func newStdWriter(n *Nova, num, pri uint16, rate float32) *stdWriter {
+    d := &stdWriter{
         controller: controller{
-            num: devRTC,
-            pri: priRTC,
+            num: num,
+            pri: pri,
             dev: make(chan devmsg),
             n: n,
         },
     }
-    go d.device(lineFreq)
+    go d.device(rate)
     return d
 }
 
-func (d *rtc) device(lineFreq int) {
-    periods := [...]time.Duration {
-        time.Second/time.Duration(lineFreq),
-        time.Second/10,
-        time.Second/100,
-        time.Second/1000,
-    }
-    ticker := time.NewTicker(periods[0])
+func (d *stdWriter) device(rate float32) {
+    period := time.Duration(float32(time.Second)/rate)
+    t := time.NewTimer(time.Second * 1)
+    t.Stop()
+    expired := true
     for {
         select {
         case msg := <-d.dev:
             switch msg.typ {
             case ioRST:
-                ticker.Stop()
-                ticker = time.NewTicker(periods[0])
                 d.idle()
             case ioDOA:
-                ticker.Stop()
-                ticker = time.NewTicker(periods[msg.data&03])
+                // Load output register
+                d.data = msg.data
                 fallthrough
             case ioNIO, ioDIA, ioDIB, ioDOB, ioDIC, ioDOC:
+                if msg.flags == ioS {
+                    // Start device; delay until end of frame before write
+                    if !t.Stop() && !expired {
+                        <-t.C
+                    }
+                    t.Reset(period)
+                    expired = false
+                }
                 d.flags(msg)
             case ioSKP:
                 msg.data = d.skip(msg)
             default:
-                panic("RTC: invalid message type")
+                panic(fmt.Sprintf("%s: invalid message type", deviceName(d.num)))
             }
             d.dev <- msg    // Ack
-        case <-ticker.C:
+        case <-t.C:
+            // Write to device
+            expired = true
+            if d.w != nil {
+                b := []byte{byte(d.data)}
+                if _, err := d.w.Write(b); err != nil {
+                    panic(fmt.Sprintf("%s: %v", deviceName(d.num), err))
+                }
+            }
             d.complete()
         }
     }
+}
+
+func (d *stdWriter) attach(w io.Writer) {
+    d.w = w
 }

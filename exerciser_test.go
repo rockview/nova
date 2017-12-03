@@ -24,6 +24,9 @@ package nova
 
 import (
     "time"
+    "bytes"
+    "math/rand"
+    "math/bits"
 
     "testing"
 )
@@ -34,8 +37,11 @@ Exerciser, tape 095-000012-02, document 097-000004-02.
 
 See: ftp://bitsavers.informatik.uni-stuttgart.de/pdf/dg/software/diag/097-000004-02_Exerciser_1971.pdf 
 
-Start address 00002. The test will repeat indefinitely. Place a HALT instruction
-at address 00236 to halt the test after one pass.
+01070: STA0: ... ; Start of instruction tests
+00162: BEG1: ... ; Start of device tests
+03115: JMP @LAST ; Start new pass
+
+Start address 00002. The test will repeat indefinitely.
 
 The comments below match the labels in the program listing of the document above.
 */
@@ -1771,33 +1777,121 @@ The comments below match the labels in the program listing of the document above
         03135: 0000754,
         03136: 0000162, // LAST
     }
-    startAddr := 00002
-    haltAddr := 00236
-
     n := NewNova()
     n.LoadMemory(0, program[:])
 
-    // Stop test after one pass
-    //n.Deposit(haltAddr, 0063077)
+    // Switch register settings for test
+    const (
+        swTTO1 = 1 << (iota + 7)
+        swTTI1
+        swPTR1
+        swPTP1
+        swRTC
+        swTTO
+        swTTI
+        swPTR
+        swPTP
+    )
 
-    n.Switches(004000)   // Activate RTC
+    switches := swRTC | swTTI | swPTR | swTTI1 | swPTR1 | swTTO | swPTP | swTTO1 | swPTP1
+    n.Switches(switches)
 
-    if false {
-        DisasmBlock(program[:], startAddr, haltAddr - startAddr)
-        return
+    type devTest struct {
+        dev int
+        media *bytes.Buffer
     }
-    if false {
-        _, err := n.Trace(startAddr)
+
+    // Input device test setup
+    inputTests := [...]devTest{
+        {DevTTI, newTestTape()},
+        {DevPTR, newTestTape()},
+        {DevTTI1, newTestTape()},
+        {DevPTR1, newTestTape()},
+    }
+    for _, test := range inputTests {
+        err := n.Attach(test.dev, test.media)
         if err != nil {
             t.Error(err)
+            return
         }
-        return
     }
-    n.Start(startAddr)
-    addr, err := n.WaitForHalt(time.Millisecond * 1000)
-    if err == nil {
-        t.Error("have: %05o, want: timeout", addr)
-    } else {
-        n.Stop()
+    startInputMediaLen := inputTests[0].media.Len()
+
+    // Output device test setup
+    outputTests := [...]devTest{
+        {DevTTO, new(bytes.Buffer)},
+        {DevPTP, new(bytes.Buffer)},
+        {DevTTO1, new(bytes.Buffer)},
+        {DevPTP1, new(bytes.Buffer)},
     }
+    for _, test := range outputTests {
+        err := n.Attach(test.dev, test.media)
+        if err != nil {
+            t.Error(err)
+            return
+        }
+    }
+    startOutputMediaLen := outputTests[0].media.Len()
+
+    // HALT at end of pass
+    n.Deposit(03115, 0063077)
+
+    n.Start(00002)
+    var pass int
+    for {
+        _, err := n.WaitForHalt(time.Millisecond * 5000)
+        if err != nil {
+            t.Error("have: timeout, want: halt")
+            n.Stop()
+            return
+        }
+
+        pass++
+        if pass == 50 {
+            break
+        }
+
+        n.Examine(0162) // Load PC
+        n.Continue()
+    }
+
+    // Check that input was consumed
+    for _, test := range inputTests {
+        if !(test.media.Len() < startInputMediaLen) {
+            t.Errorf("%s: have: %d, want: <%d", deviceName(uint16(test.dev)), test.media.Len(), startInputMediaLen)
+        }
+    }
+    // Check that output was produced
+    for _, test := range outputTests {
+        if !(test.media.Len() > startOutputMediaLen) {
+            t.Errorf("%s: have: %d, want: >%d", deviceName(uint16(test.dev)), test.media.Len(), startOutputMediaLen)
+        }
+    }
+}
+
+func newTestTape() *bytes.Buffer {
+    var b bytes.Buffer
+
+    // Write tape leader
+    for i := 0; i < 256; i++ {
+        b.WriteByte(0)
+    }
+
+    // Write random even-parity content
+    r := rand.New(rand.NewSource(0))
+    for i := 0; i < 512; i++ {
+        c := uint8(r.Intn(128))
+        bits := bits.OnesCount8(c)
+        if bits%2 != 0 {
+            c |= 128
+        }
+        b.WriteByte(byte(c))
+    }
+
+    // Write tape trailer
+    for i := 0; i < 128; i++ {
+        b.WriteByte(0)
+    }
+
+    return &b
 }
