@@ -39,6 +39,7 @@ import (
     "fmt"
     "time"
     "io"
+    "errors"
 )
 
 // Reset implements the console RESET function. The processor is halted at the
@@ -85,7 +86,7 @@ func (n *Nova) InstStep() (pc, halt int, err error) {
     n.con <- conmsg{typ:conInstStep}
     con := <-n.con
     if con.typ == conRunning {
-        err = fmt.Errorf("processor running")
+        err = errors.New("processor running")
         return
     }
     pc = int(con.addr)
@@ -98,7 +99,7 @@ func (n *Nova) ProgramLoad() error {
     n.con <- conmsg{typ:conProgramLoad}
     con := <-n.con
     if con.typ == conRunning {
-        return fmt.Errorf("processor running")
+        return errors.New("processor running")
     }
     return nil
 }
@@ -111,7 +112,7 @@ func (n *Nova) Deposit(addr, data int) error {
     n.con <- conmsg{typ:conDeposit, addr:uint16(addr), data:uint16(data)}
     con := <-n.con
     if con.typ == conRunning {
-        return fmt.Errorf("processor running")
+        return errors.New("processor running")
     }
     return nil
 }
@@ -124,7 +125,7 @@ func (n *Nova) DepositNext(data int) error {
     n.con <- conmsg{typ:conDepositNext, data:uint16(data)}
     con := <-n.con
     if con.typ == conRunning {
-        return fmt.Errorf("processor running")
+        return errors.New("processor running")
     }
     return nil
 }
@@ -137,7 +138,7 @@ func (n *Nova) Examine(addr int) (int, error) {
     n.con <- conmsg{typ:conExamine, addr:uint16(addr)}
     con := <-n.con
     if con.typ == conRunning {
-        return 0, fmt.Errorf("processor running")
+        return 0, errors.New("processor running")
     }
     return int(con.data), nil
 
@@ -151,7 +152,7 @@ func (n *Nova) ExamineNext() (int, error) {
     n.con <- conmsg{typ:conExamineNext}
     con := <-n.con
     if con.typ == conRunning {
-        return 0, fmt.Errorf("processor running")
+        return 0, errors.New("processor running")
     }
     return int(con.data), nil
 }
@@ -174,34 +175,56 @@ func (n *Nova) IsRunning() bool {
 // processor is running, memory remains unchanged and an error is returned.
 func (n *Nova) LoadMemory(addr int, words []uint16) error {
     if n.IsRunning() {
-        return fmt.Errorf("processor running")
+        return errors.New("processor running")
     }
     copy(n.m[addr&kAddrMask:], words)
     return nil
 }
 
-// Trace shows the processor state before each instuction is executed beginning
-// with the instruction at addr. If the processor is running, no instruction is
-// executed and an error is returned.
-func (n *Nova) Trace(addr int) (int, error) {
+const (
+    TraceCycles = 1 + iota
+    TraceAddr
+)
+
+// Trace traces the thread of execution of the processor by logging the machine
+// state to stdout before each instruction is executed. Execution begins with the
+// instruction at the supplied addr. The typ argument controls how execution is
+// monitored for eventual termination. If it has the value TraceCycles, then
+// execution continues until the number of instructions specified by the data
+// argument have been executed. If it has the value TraceAddr, then execution
+// continues until the instruction at the address specified by the data
+// argument has been executed. Execution may be terminated before either of
+// these conditions is met if a HALT instruction is executed. The address of
+// the last instruction executed is returned. If the processor is running, no
+// instruction is executed and an error is returned.
+func (n *Nova) Trace(addr int, typ int, data uint64) (int, error) {
     _, err := n.Examine(addr)   // Load PC
     if err != nil {
         return 0, err
     }
+loop:
     for {
         state, _ := n.State()
-        if err != nil {
-            return 0, err
-        }
         fmt.Println(state)
-        ad, halt, err := n.InstStep()
-        if err != nil {
-            return 0, err
-        }
+        addr, halt, _ := n.InstStep()
         if halt == 1 {
-            return int(ad), nil
+            break loop
+        }
+        switch typ {
+        case TraceCycles:
+            data--
+            if data == 0 {
+                break loop
+            }
+        case TraceAddr:
+            if addr == int(data) {
+                break loop
+            }
+        default:
+            return 0, errors.New("invalid trace type")
         }
     }
+    return int(addr), nil
 }
 
 // State returns the processor state as a string having the following format:
@@ -209,7 +232,7 @@ func (n *Nova) Trace(addr int) (int, error) {
 // prior to the execution of the indicated instruction is returned.
 func (n *Nova) State() (string, error) {
     if n.IsRunning() {
-        return "", fmt.Errorf("processor running")
+        return "", errors.New("processor running")
     }
     var carry int
     if n.flags&cpuC != 0 {
@@ -230,19 +253,21 @@ func (n *Nova) State() (string, error) {
 func (n *Nova) WaitForHalt(timeout time.Duration) (int, error) {
     select {
     case <- time.After(timeout):
-        return 0, fmt.Errorf("timed out")
+        return 0, errors.New("timed out")
     case <- n.halt:
         return int(n.pc), nil
     }
 }
 
+// Attach attaches media to a device. If the processor is running, the media is
+// not attached and an error is returned. If the device is not capable of input
+// or output or cannot support the provided media, an error is returned.
 func (n *Nova) Attach(code int, media interface{}) error {
-    num := uint16(code)
-
     if n.IsRunning() {
-        return fmt.Errorf("cannot attach to running processor")
+        return errors.New("cannot attach to running processor")
     }
 
+    num := uint16(code)&077
     dev := n.devices[num]
     if dev == nil {
         return fmt.Errorf("%s: device not found", deviceName(num))

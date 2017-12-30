@@ -36,21 +36,24 @@ var alOP = [...]string{
     4: "ADC",
     5: "SUB",
     6: "ADD",
-    7: "AND" }
+    7: "AND",
+}
 
 // Shift mnemonics
 var alSH = [...]string{
     0: "",
     1: "L",
     2: "R",
-    3: "S" }
+    3: "S",
+}
 
 // Carry mnemonics
 var alC = [...]string{
     0: "",
     1: "Z",
     2: "O",
-    3: "C" }
+    3: "C",
+}
 
 // Skip mnemonics
 var alSKIP = [...]string{
@@ -61,21 +64,24 @@ var alSKIP = [...]string{
     4: "SZR",
     5: "SNR",
     6: "SEZ",
-    7: "SBN" }
+    7: "SBN",
+}
 
 // Memory reference without accumulator mnemonics
 var mr0OP = [...]string{
     0: "JMP",
     1: "JSR",
     2: "ISZ",
-    3: "DSZ" }
+    3: "DSZ",
+}
 
 // Memory reference with accumulator mnemonics
 var mr1OP = [...]string{
     0: "",
     1: "LDA",
     2: "STA",
-    3: "" }
+    3: "",
+}
 
 // I/O transfer operation mnemonics
 var ioOP = [...]string{
@@ -86,21 +92,24 @@ var ioOP = [...]string{
     4: "DOB",
     5: "DIC",
     6: "DOC",
-    7: "SKP" }
+    7: "SKP",
+}
 
 // IOT function mnemonics
 var ioF = [...]string{
     0: "",
     1: "S",
     2: "C",
-    3: "P" }
+    3: "P",
+}
 
 // IOT skip condition mnemonics
 var ioT = [...]string{
     0: "BN",
     1: "BZ",
     2: "DN",
-    3: "DZ" }
+    3: "DZ",
+}
 
 // IOT device code mnenmonics
 var ioD = [...]string{
@@ -167,7 +176,8 @@ var ioD = [...]string{
     074: "FPU1",
     075: "FPU2",
     076: "FPU",
-    077: "CPU" }
+    077: "CPU",
+}
 
 // DisasmWord disassembles the ir instruction.
 func DisasmWord(ir uint16) string {
@@ -195,14 +205,13 @@ func DisasmWord(ir uint16) string {
             fmt.Fprintf(&operands, ",%s", alSKIP[skip])
         }
     } else if ir&0060000 == 0060000 {
-        // TODO: needs sorting out
         // I/O transfer
         acc :=    (ir & 0014000) >> 11
         op :=     (ir & 0003400) >> 8
         f :=      (ir & 0000300) >> 6
         device := (ir & 0000077) >> 0
 
-        if device == 077 {
+        if device == devCPU {
             // CPU; common abbreviations
             switch ir {
             case 0062677:
@@ -235,7 +244,7 @@ func DisasmWord(ir uint16) string {
                     }
                 }
             }
-        } else if (device == 1) {
+        } else if (device == devMDV) {
             // MDV; common abbreviations
             switch ir {
             case 0073301:
@@ -255,7 +264,7 @@ func DisasmWord(ir uint16) string {
                 // Non-SKP
                 operator.WriteString(ioF[f])
             }
-            if (op == 0) || (op == 7) {
+            if op == 0 || op == 7 {
                 // NIO or SKP
                 fmt.Fprintf(&operands, "%s", ioD[device])
             } else {
@@ -302,10 +311,10 @@ func DisasmWord(ir uint16) string {
     return fmt.Sprintf("%-8s%s", operator.String(), operands.String())
 }
 
-// DisasmBlock disassembles the words slice from the start element up to, but excluding, the limit element.
-func DisasmBlock(start, limit int, words []uint16) {
-    for addr := start; addr < limit; addr++ {
-        word := words[addr]
-        fmt.Printf("%05o %06o  %s\n", addr, word, DisasmWord(word))
+// DisasmBlock disassenbles a block of words labelling them with addresses
+// starting from addr.
+func DisasmBlock(addr int, words []uint16) {
+    for i, word := range words {
+        fmt.Printf("%05o %06o  %s\n", addr + i, word, DisasmWord(word))
     }
 }
